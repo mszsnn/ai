@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>神经网络批量处理：矩阵维度演示器</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #f4f7f6;
+            color: #333;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 30px;
+        }
+        h1 { margin-bottom: 5px; color: #2c3e50; }
+        p.subtitle { color: #7f8c8d; margin-bottom: 30px; }
+        
+        .controls {
+            background: white;
+            padding: 20px 40px;
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            display: flex;
+            gap: 40px;
+            margin-bottom: 40px;
+        }
+        .slider-group {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        label { font-weight: bold; margin-bottom: 10px; }
+        input[type="range"] { cursor: pointer; }
+        .val-display { font-size: 1.2em; color: #e74c3c; font-weight: bold; margin-top: 5px; }
+
+        .equation-container {
+            display: flex;
+            align-items: center;
+            gap: 20px;
+            background: white;
+            padding: 40px;
+            border-radius: 10px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.05);
+        }
+
+        .matrix-wrapper {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        .matrix {
+            display: grid;
+            gap: 2px;
+            background: #bdc3c7;
+            padding: 2px;
+            border-radius: 4px;
+        }
+
+        .cell {
+            width: 35px;
+            height: 35px;
+            background: white;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            font-size: 12px;
+            color: #bdc3c7;
+            transition: all 0.2s;
+        }
+
+        /* W Matrix - Blue */
+        #matrix-W .cell { background: #ebf5fb; color: #2980b9; }
+        /* X Matrix - Green */
+        #matrix-X .cell { background: #eaeded; color: #27ae60; }
+        /* Z Matrix - Purple */
+        #matrix-Z .cell { background: #f5eef8; color: #8e44ad; }
+
+        .operator { font-size: 30px; font-weight: bold; color: #7f8c8d; margin: 0 10px; }
+        .dimension-label { margin-top: 15px; font-weight: bold; font-size: 14px; }
+        .sub-label { font-size: 12px; color: #7f8c8d; margin-top: 5px; }
+
+        /* Highlight classes for intuition */
+        .highlight-col { border: 2px solid #e74c3c !important; z-index: 10;}
+    </style>
+</head>
+<body>
+
+    <h1>🚀 深度学习：多样本矩阵维度引擎</h1>
+    <p class="subtitle">核心公式: <b>Z = W · X</b> (忽略偏置 b)</p>
+
+    <div class="controls">
+        <div class="slider-group">
+            <label>神经元数量 (n_h)</label>
+            <input type="range" id="slider-nh" min="1" max="8" value="4">
+            <div class="val-display" id="val-nh">4</div>
+        </div>
+        <div class="slider-group">
+            <label>输入特征数 (n_x)</label>
+            <input type="range" id="slider-nx" min="1" max="8" value="3">
+            <div class="val-display" id="val-nx">3</div>
+        </div>
+        <div class="slider-group">
+            <label>图片样本数 (m)</label>
+            <input type="range" id="slider-m" min="1" max="8" value="5">
+            <div class="val-display" id="val-m">5</div>
+        </div>
+    </div>
+
+    <div class="equation-container">
+        <div class="matrix-wrapper">
+            <div id="matrix-W" class="matrix"></div>
+            <div class="dimension-label" id="label-W">W (4 × 3)</div>
+            <div class="sub-label">模具 (侦探 × 特征)</div>
+        </div>
+
+        <div class="operator">×</div>
+
+        <div class="matrix-wrapper">
+            <div id="matrix-X" class="matrix"></div>
+            <div class="dimension-label" id="label-X">X (3 × 5)</div>
+            <div class="sub-label">数据 (特征 × 图片数)</div>
+        </div>
+
+        <div class="operator">=</div>
+
+        <div class="matrix-wrapper">
+            <div id="matrix-Z" class="matrix"></div>
+            <div class="dimension-label" id="label-Z">Z (4 × 5)</div>
+            <div class="sub-label">预测得分 (侦探 × 图片数)</div>
+        </div>
+    </div>
+
+    <script>
+        const sliderNh = document.getElementById('slider-nh');
+        const sliderNx = document.getElementById('slider-nx');
+        const sliderM = document.getElementById('slider-m');
+        
+        const valNh = document.getElementById('val-nh');
+        const valNx = document.getElementById('val-nx');
+        const valM = document.getElementById('val-m');
+
+        const matrixW = document.getElementById('matrix-W');
+        const matrixX = document.getElementById('matrix-X');
+        const matrixZ = document.getElementById('matrix-Z');
+
+        const labelW = document.getElementById('label-W');
+        const labelX = document.getElementById('label-X');
+        const labelZ = document.getElementById('label-Z');
+
+        function drawGrid(container, rows, cols) {
+            container.innerHTML = '';
+            container.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
+            container.style.gridTemplateRows = `repeat(${rows}, 1fr)`;
+            
+            for (let i = 0; i < rows * cols; i++) {
+                const cell = document.createElement('div');
+                cell.className = 'cell';
+                
+                // Add column-based highlight class for X and Z to show samples
+                if (container.id === 'matrix-X' || container.id === 'matrix-Z') {
+                    let colIndex = i % cols;
+                    // highlight the second sample column as an example if it exists
+                    if(colIndex === 1 && cols > 1) {
+                        cell.style.border = "2px solid #e74c3c";
+                        cell.style.fontWeight = "bold";
+                        cell.style.color = "#e74c3c";
+                    }
+                }
+                
+                container.appendChild(cell);
+            }
+        }
+
+        function update() {
+            const nh = parseInt(sliderNh.value);
+            const nx = parseInt(sliderNx.value);
+            const m = parseInt(sliderM.value);
+
+            // Update text displays
+            valNh.innerText = nh;
+            valNx.innerText = nx;
+            valM.innerText = m;
+
+            // Draw grids
+            drawGrid(matrixW, nh, nx);
+            drawGrid(matrixX, nx, m);
+            drawGrid(matrixZ, nh, m);
+
+            // Update Labels
+            labelW.innerText = `W (${nh} × ${nx})`;
+            labelX.innerText = `X (${nx} × ${m})`;
+            labelZ.innerText = `Z (${nh} × ${m})`;
+        }
+
+        // Event Listeners
+        sliderNh.addEventListener('input', update);
+        sliderNx.addEventListener('input', update);
+        sliderM.addEventListener('input', update);
+
+        // Initial draw
+        update();
+    </script>
+</body>
+</html>
