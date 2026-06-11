@@ -1,0 +1,50 @@
+import numpy as np
+
+# 为了 深度神经网络服务, 求 Z 或者 dZ
+
+def softmax(Z):
+    """
+    工业级 Softmax 前向计算 (自带防溢出装甲)
+    Z 的维度: (C, m) -> C是类别数，m是样本数
+    """
+    max = np.max(Z, axis = 0, keepdims = True)
+    top = np.exp(Z - max)
+    bottom = np.sum(top, axis = 0, keepdims = True)
+    A = top / bottom
+    return A
+
+
+def softmax_backward(AL,Y):
+    """
+    最底层的误差推导
+    AL: 预测的概率分布 (C, m)
+    Y: 真实的 One-hot 标签 (C, m)
+    """
+
+    return AL - Y
+
+
+def relu(Z):
+    """隐藏层的免责阀门：小于0装死，大于0放行"""
+    A = np.maximum(0, Z)
+    return A
+
+
+def relu_backward(dA, Z):
+    """
+    ReLU的反向破甲公式：如果当年Z<=0，这层不背锅(导数为0)
+    relu 的导数， 要么 为 1 要么 0
+    * dA 也就是 dA 矩阵的部分值，变成 0
+    """
+
+    dZ = np.array(dA, copy = True) # 深度拷贝
+    dZ[Z <= 0] = 0 # 神奇魔法
+
+    # NumPy会先去看Z矩阵，它会生成一张隐形的“对错表”：如果 $Z$ 里的某个数字 <= 0，就是 True；否则是 False
+    # 它拿着这张“对错表”，去覆盖在刚刚复印好的 dZ 矩阵上。凡是对应位置为 True 直接把 dZ 里的数字强行改成 0
+
+    return dZ
+
+
+
+
