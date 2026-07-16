@@ -68,7 +68,7 @@ class Transformer(nn.Module):
 
         target_padding_mask = (target == self.pad_id).unsqueeze(1).unsqueeze(2)
 
-        target_look_mask = generate_mask(sentence_len)
+        target_look_mask = generate_mask(sentence_len, target.device)
 
         # pad | 未来未知都需要屏蔽
         # | & 本来是按位操作符， 但是两边是 Torch 张量， 重载了 | 变成了 按位置求或  且操作

@@ -7,18 +7,20 @@
 import torch
 
 
-def generate_mask(sentence_len):
+def generate_mask(sentence_len, device=None):
     """
     定义 True 为最终要覆盖的位置
     生成用于 Decoder 自回归训练的掩码 (Look-ahead Mask)
     :param sentence_len: 目标序列的长度 (Target Sequence Length)
+    :param device
     :return: shape 为 [1, 1, seq_len, seq_len] 的掩码张量
+
     """
 
     # 第一步：生成一个 seq_len x seq_len 的全 1 正方形矩阵
     # 比如 seq_len=4，就是 4x4 的全 1 矩阵
 
-    mask = torch.ones(sentence_len, sentence_len, dtype=torch.bool)
+    mask = torch.ones(sentence_len, sentence_len, dtype=torch.bool, device = device)
 
     # 对于主对角线位置机器位置以下的值保留，
     # diagonal=0 位置 就是  [0, 0] [1, 1] [2,2]...

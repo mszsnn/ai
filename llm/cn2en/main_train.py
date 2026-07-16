@@ -1,7 +1,10 @@
+import os.path
+
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
+from llm.cn2en.checkpoint import save_checkpoint, load_checkpoint
 from llm.cn2en.tokenizer import BasicTokenizer
 
 from llm.cn2en.translation_dataset import (
@@ -13,7 +16,7 @@ from llm.cn2en.translation_dataset import (
 from llm.cn2en.transformer import Transformer
 
 from epoch_core import  train_one_epoch
-from translate_sentence import translate_sentence
+from translate_sentence import translate_sentence, beam_search_translate_sentence
 
 # ==================================================
 # 1. 设备
@@ -118,10 +121,10 @@ train_loader = DataLoader(
 model = Transformer(
     src_vocab_size=src_tokenizer.vocab_size,
     target_vocab_size=tgt_tokenizer.vocab_size,
-    d_model=64,
+    d_model=512,
     num_head=8,
-    high_dimension=256,
-    num_layers=2,
+    high_dimension=1024,
+    num_layers=3,
     pad_id=src_tokenizer.PAD_ID,
     dropout=0.1
 )
@@ -136,12 +139,19 @@ optimizer = torch.optim.Adam(
     lr=1e-4
 )
 
-epochs = 10
+path = 'transformer_checkpoint.pt'
+if os.path.exists(path):
+    start_epoch, _ = load_checkpoint(model, optimizer, path, device=device)
+else:
+    start_epoch = -1
+
+epochs = 20
 print("=============loss start=============")
 
-for epoch in range(epochs):
+for epoch in range(start_epoch + 1, epochs):
     loss_avg = train_one_epoch(model, train_loader, optimizer, criterion, device)
     print(f"loss{epoch}", loss_avg)
+    save_checkpoint(model,optimizer,epoch,loss_avg, "transformer_checkpoint.pt")
 
 print("=============loss end=============")
 
@@ -161,7 +171,7 @@ test_sentences = [
 ]
 
 for zh_sentence in test_sentences:
-    en_translation = translate_sentence(
+    en_translation = beam_search_translate_sentence(
         model=model,
         sentence=zh_sentence,
         src_tokenizer=src_tokenizer,
