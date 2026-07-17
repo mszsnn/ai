@@ -17,6 +17,11 @@ def translate_sentence(model, sentence, src_tokenizer, tgt_tokenizer, max_len, d
     # 增加 batch 维度  [sentence_len] => [1, sentence_len]
     src_tensor = torch.tensor([src_ids], dtype= torch.long, device=device)
 
+    # Encoder 只依赖源句子，推理时提前算一次即可，后续每一步复用
+    with torch.no_grad():
+        src_mask = model.make_encoder_mask(src_tensor)
+        encoder_output = model.encode(src_tensor, src_mask)
+
     # 一开始，我们只给 Decoder 一个空荡荡的开始符 <SOS>
     decoder_input_ids = [tgt_tokenizer.SOS_ID]
 
@@ -28,7 +33,13 @@ def translate_sentence(model, sentence, src_tokenizer, tgt_tokenizer, max_len, d
 
         # 前向传播, 不要计算梯度
         with torch.no_grad():
-            logits = model(src_tensor, decoder_input_tensor)
+            target_mask = model.make_decoder_mask(decoder_input_tensor)
+            logits = model.decode(
+                decoder_input_tensor,
+                encoder_output,
+                target_mask,
+                src_mask
+            )
 
         # 用贪心搜索，每一步都找最大的概率
         # # logits[0] 取出当前 batch，[-1] 取出序列最后一步，[:] 取出整个词表的打分
@@ -63,6 +74,11 @@ def beam_search_translate_sentence(model, sentence, src_tokenizer, tgt_tokenizer
     # 增加 batch 维度  [sentence_len] => [1, sentence_len]
     src_tensor = torch.tensor([src_ids], dtype=torch.long, device=device)
 
+    # Encoder 只依赖源句子，beam 的所有分支共享同一份编码结果
+    with torch.no_grad():
+        src_mask = model.make_encoder_mask(src_tensor)
+        encoder_output = model.encode(src_tensor, src_mask)
+
     # 初始化beam容器， 容器格式 [ (id 列表, 得分) ]
 
     beams = [([tgt_tokenizer.SOS_ID], 0.0)]
@@ -78,7 +94,13 @@ def beam_search_translate_sentence(model, sentence, src_tokenizer, tgt_tokenizer
             decoder_input_tensor = torch.tensor([seq], dtype=torch.long, device=device)
             # 前向传播, 不要计算梯度
             with torch.no_grad():
-                logits = model(src_tensor, decoder_input_tensor)
+                target_mask = model.make_decoder_mask(decoder_input_tensor)
+                logits = model.decode(
+                    decoder_input_tensor,
+                    encoder_output,
+                    target_mask,
+                    src_mask
+                )
             # 得到最后一步生成的词的 logits
             last_logits = logits[0, -1, :]
 

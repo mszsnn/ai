@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-from transformers.masking_utils import padding_mask_function
 
 from encoder import Encoder
 from decoder import Decoder
@@ -74,8 +73,23 @@ class Transformer(nn.Module):
         # | & 本来是按位操作符， 但是两边是 Torch 张量， 重载了 | 变成了 按位置求或  且操作
         end_mask = target_look_mask | target_padding_mask
 
-
         return end_mask
+
+
+    def encode(self, src, src_mask):
+        encoder_output = self.encoder(src, mask=src_mask)
+        return encoder_output
+
+
+    def decode(self, target, encoder_output, target_mask, src_mask):
+        decoder_output = self.decoder(
+            target,
+            encoder_output,
+            look_mask=target_mask,
+            padding_mask=src_mask
+        )
+
+        return decoder_output
 
 
     def forward(self, src, target):
@@ -111,7 +125,7 @@ class Transformer(nn.Module):
 
         # 2 encoder
 
-        encoder_output = self.encoder(src, mask = src_mask)
+        encoder_output = self.encode(src, src_mask)
 
         # 3 decoder
         # 这里有一个很重要的细节： 为啥 padding_mask 用的是 src_mask?
@@ -119,11 +133,11 @@ class Transformer(nn.Module):
         # padding_mask是 QK^T 后得到了打分矩阵，每一行代表了 Q Token 对所有 K Token 的打分，
         # padding_mask 其实就是阻止 K 中的 pad 被 Q关注到
 
-        decoder_output = self.decoder(
+        decoder_output = self.decode(
             target,
             encoder_output,
-            look_mask = target_mask,
-            padding_mask = src_mask
+            target_mask,
+            src_mask
         )
 
 
