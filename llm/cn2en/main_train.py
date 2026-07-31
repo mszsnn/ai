@@ -145,7 +145,7 @@ if os.path.exists(path):
 else:
     start_epoch = -1
 
-epochs = 20
+epochs = 40
 print("=============loss start=============")
 
 for epoch in range(start_epoch + 1, epochs):
