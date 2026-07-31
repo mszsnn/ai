@@ -53,7 +53,7 @@ class TokenEmbedding(nn.Module):
 
 
         """
-        return  self.embedding(x) *  math.sqrt(self.d_model)
+        return  self.embedding(x) * math.sqrt(self.d_model)
 
 
 

@@ -5,13 +5,25 @@
 ### 代码过程
 1. 处理语料， 将语料读取为 jsonl 格式，英文和中文一一对应  
   * assemble_data.py 语料处理代码 -> translation_dataset.jsonl
-
 2. 处理 tokenizer , 单一功能， 将句子输出为 ids 序列， 切处理为等长
    * tokenizer.py
 3. 处理基础表示层, （1）嵌入矩阵 （2） 位置矩阵 最终得到 有位置信息和语义信息的词向量
   * represent_layer.py
-4  
-
+4. 多头注意力模型
+   mutil-head-attention
+5.  编码器层 EncoderBlock， 多头注意力机制 + 前馈神经网络
+  * x -> attention -> Add 残差链接 -> layerNorm 层归一化
+  * encoder_layer.py 
+6.  将 EncoderBlock 堆叠 N 层， 
+  * encoder.py
+7. 解码层 decoder-layer
+   * 掩码自注意力层， 让解码器理解自已已经生成的内容，但是不看未来
+   * 交叉注意力层， 这里是真正和编码器交互的地方
+   * 前馈神经网络层 对融合了原文和译文信息的特则进行非线性加工
+8. 解码器 decoder 堆叠 N 层 
+  * decoder.py 最终还要经过一层映射， 转化为整个词表的概率， 为了后续方便进行loss 计算
+9. 到这里模型 model 就结束了，接下来
+   * 训练的处理
 
 
 
@@ -19,7 +31,7 @@
 
 阶段一：数据与预处理模块 (Data & Preprocessing)
 说明：将真实文本转化为模型可识别的张量，并生成关键的遮罩（Mask）。
-● TranslationDataset(Dataset)：负责调用 Tokenizer，将中英文本转化为 ID 序列。
+● 调用 Tokenizer，将中英文本转化为 ID 序列。
 ● 辅助函数 create_masks(src_ids, tgt_ids)：
   ○ 输入：源语言 ID 和目标语言 ID。
   ○ 核心逻辑：生成 src_mask（遮蔽原文中的 PAD）和 tgt_mask（极度关键：不仅要遮蔽 PAD，还要生成下三角矩阵 look_ahead_mask，防止解码器在训练时“偷看”未来的英文单词）。
