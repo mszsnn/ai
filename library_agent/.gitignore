@@ -30,6 +30,9 @@ chroma_data/
 *.sqlite3
 *.db
 
+# Large source documents
+rag_engine/敏捷项目管理.pdf
+
 # OS and editor files
 .DS_Store
 .idea/

@@ -43,4 +43,4 @@ ENV/
 .env.*
 !.env.example
 
-敏捷项目管理.pdf
+library_agent/rag_engine/敏捷项目管理.pdf
