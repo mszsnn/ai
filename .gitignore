@@ -42,3 +42,5 @@ ENV/
 .env
 .env.*
 !.env.example
+
+敏捷项目管理.pdf
