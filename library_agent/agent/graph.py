@@ -53,13 +53,10 @@ class BookAgent:
 
         self.llm_with_tools = self.llm.bind_tools(agent_tools)
 
-    def _agent_node(self, state: AgentState):
-        """
-        思考节点： 挂在 System prompt 和 历史 Summary
-        """
+    def _build_agent_prompt(self, state: AgentState):
+        """Build the system prompt shared by sync and streaming graph runs."""
         summary = state.get('summary', '')
 
-        # 定义系统级 prompt
         sys_prompt_text = (
             "你是一个专业的图书智能体。\n"
             "【核心行为准则】：\n"
@@ -71,9 +68,13 @@ class BookAgent:
         if summary:
             sys_prompt_text = sys_prompt_text + f"\n\n【之前对话的背景摘要】：\n{summary}"
 
-        system_prompt = SystemMessage(content=sys_prompt_text)
+        return [SystemMessage(content=sys_prompt_text)] + state['messages']
 
-        full_prompt = [system_prompt] + state['messages']
+    def _agent_node(self, state: AgentState):
+        """
+        思考节点： 挂在 System prompt 和 历史 Summary
+        """
+        full_prompt = self._build_agent_prompt(state)
 
 
         # 加上防御机制
@@ -110,6 +111,62 @@ class BookAgent:
                         SystemMessage(content="[系统级容错] 刚才的上下文格式错乱，脏数据已清理。请重新思考并回答用户。")
                     ]
                 }
+        except Exception as unknown_err:
+            print(f"[未知异常] {str(unknown_err)}")
+            return {"messages": [AIMessage(content=f"[系统提示] 发生未知内部错误: {str(unknown_err)}")]}
+
+    @staticmethod
+    def _chunk_to_message(message):
+        """Convert a streamed AIMessageChunk into a graph-safe AIMessage."""
+        if isinstance(message, AIMessage):
+            return message
+
+        return AIMessage(
+            content=getattr(message, 'content', ''),
+            additional_kwargs=getattr(message, 'additional_kwargs', {}),
+            response_metadata=getattr(message, 'response_metadata', {}),
+            tool_calls=getattr(message, 'tool_calls', []),
+            invalid_tool_calls=getattr(message, 'invalid_tool_calls', []),
+        )
+
+    async def _agent_node_streaming(self, state: AgentState):
+        """Async agent node used by the API so LangGraph can expose model tokens."""
+        full_prompt = self._build_agent_prompt(state)
+
+        try:
+            response = None
+            async for chunk in self.llm_with_tools.astream(full_prompt):
+                response = chunk if response is None else response + chunk
+
+            if response is None:
+                response = AIMessage(content='')
+
+            return {'messages': [self._chunk_to_message(response)]}
+
+        except (RateLimitError, AuthenticationError, APIConnectionError) as fatal_err:
+            print(f"[熔断器触发] 遭遇致命物理错误: {type(fatal_err).__name__}")
+            return {"messages": [AIMessage(
+                content="[系统提示] 抱歉，AI 大脑暂时失去连接（可能由于 API 额度耗尽或网络波动）。请稍后再试或联系管理员。"
+            )]}
+
+        except BadRequestError as bad_req_err:
+            print(f"[自动自愈] 拦截到上下文错乱 (400): {str(bad_req_err)[:50]}")
+            last_msg = state["messages"][-1]
+
+            if isinstance(last_msg, SystemMessage) and "[系统级容错]" in last_msg.content:
+                print("[熔断器触发] 自愈失败，停止死循环！")
+                return {"messages": [AIMessage(
+                    content="[系统提示] 对话状态严重异常，系统尝试自愈失败，请尝试开启新的会话 (清空 Thread ID)。"
+                )]}
+
+            if hasattr(last_msg, "id") and last_msg.id:
+                return {
+                    "messages": [
+                        RemoveMessage(id=last_msg.id),
+                        SystemMessage(content="[系统级容错] 刚才的上下文格式错乱，脏数据已清理。请重新思考并回答用户。")
+                    ]
+                }
+
         except Exception as unknown_err:
             print(f"[未知异常] {str(unknown_err)}")
             return {"messages": [AIMessage(content=f"[系统提示] 发生未知内部错误: {str(unknown_err)}")]}
@@ -162,7 +219,13 @@ class BookAgent:
         return END
 
 
-    def build_graph(self, use_sqlite: bool = True, db_path: str = DEFAULT_SQLLite_PATH):
+    def build_graph(
+        self,
+        use_sqlite: bool = True,
+        db_path: str = DEFAULT_SQLLite_PATH,
+        checkpointer=None,
+        streaming: bool = False,
+    ):
         """
         拼接节点，构建执行图
         """
@@ -170,7 +233,10 @@ class BookAgent:
         workflow = StateGraph(AgentState)
 
         # 挂在节点
-        workflow.add_node('agent_brain', self._agent_node)
+        workflow.add_node(
+            'agent_brain',
+            self._agent_node_streaming if streaming else self._agent_node,
+        )
         workflow.add_node('action_tools', ToolNode(agent_tools, handle_tool_errors=True))
         workflow.add_node('summarize_and_trim', self._summarize_and_trim)
 
@@ -184,14 +250,16 @@ class BookAgent:
         workflow.add_edge('action_tools', 'agent_brain')
         workflow.add_edge('summarize_and_trim', END)
 
-        if use_sqlite:
+        if checkpointer is not None:
+            compiled_checkpointer = checkpointer
+        elif use_sqlite:
             connet = sqlite3.connect(db_path, check_same_thread=False)
-            checkpointer = SqliteSaver(connet)
+            compiled_checkpointer = SqliteSaver(connet)
             print('SQLite 长期持久化已经做好')
         else:
             from langgraph.checkpoint.memory import MemorySaver
-            checkpointer = MemorySaver()
-        return  workflow.compile(checkpointer = checkpointer)
+            compiled_checkpointer = MemorySaver()
+        return workflow.compile(checkpointer=compiled_checkpointer)
 
 
 # ==========================================
@@ -213,7 +281,7 @@ if __name__ == "__main__":
     }
 
     # 3. 轮次 1：需要查书的提问
-    user_query_1 = "敏捷开发的核心价值观是什么？请给出具体来源。"
+    user_query_1 = "敏捷开发如何做？请给出具体来源。"
     print(f"[User]: {user_query_1}")
 
     # 扣动图网络执行 (Stream 模式实时查看节点轨迹)
@@ -227,5 +295,4 @@ if __name__ == "__main__":
     print(f"[Agent Response]:\n{last_msg.content}")
 
     print("\n" + "=" * 60)
-
 

@@ -32,6 +32,7 @@ chroma_data/
 
 # Large source documents
 rag_engine/敏捷项目管理.pdf
+uploads/
 
 # OS and editor files
 .DS_Store
