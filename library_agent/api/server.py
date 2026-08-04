@@ -42,6 +42,11 @@ INTERNAL_OUTPUT_MARKERS = (
     "【更新后的聊天摘要】",
     "之前对话的背景摘要",
     "【之前对话的背景摘要】",
+    "用户起初问",
+    "用户随后问",
+    "用户接着说",
+    "助手说明",
+    "我再帮你继续查",
 )
 
 
@@ -256,7 +261,9 @@ async def _chat_events(request: Request, payload: ChatRequest) -> AsyncGenerator
         yield _sse({"type": "start", "thread_id": thread_id, "book_id": payload.book_id}, event="start")
 
         library_storage = getattr(request.app.state, "library_storage", None)
+        book_title = payload.book_id
         if library_storage is not None:
+            book_title = await asyncio.to_thread(library_storage.get_book_title, payload.book_id) or payload.book_id
             await asyncio.to_thread(library_storage.ensure_thread, thread_id, payload.book_id)
             await asyncio.to_thread(
                 library_storage.add_message,
@@ -267,7 +274,10 @@ async def _chat_events(request: Request, payload: ChatRequest) -> AsyncGenerator
             )
 
         async for part in agent_app.astream(
-            {"messages": [HumanMessage(content=payload.message)]},
+            {
+                "messages": [HumanMessage(content=payload.message)],
+                "book_title": book_title,
+            },
             config=config,
             stream_mode=["messages", "updates"],
             version="v2",

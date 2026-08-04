@@ -100,6 +100,14 @@ class LibraryStorage:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def get_book_title(self, book_id: str) -> str | None:
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                "SELECT title FROM books WHERE book_id = ?",
+                (book_id,),
+            ).fetchone()
+        return row["title"] if row else None
+
     def update_book_meta(self, book_id: str, meta: str) -> None:
         """Refresh display metadata without changing the book identity."""
         timestamp = _now()

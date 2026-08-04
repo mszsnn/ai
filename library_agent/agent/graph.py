@@ -36,6 +36,7 @@ class AgentState(TypedDict):
 
     messages: Annotated[list, add_messages]
     summary: str
+    book_title: str
 
 # ==========================================
 # 2. 大脑
@@ -59,19 +60,18 @@ class BookAgent:
 
     def _build_agent_prompt(self, state: AgentState):
         """Build the system prompt shared by sync and streaming graph runs."""
-        summary = state.get('summary', '')
+        book_title = state.get('book_title', '')
 
         sys_prompt_text = (
             "你是一个专业的图书智能体。\n"
+            f"当前用户选中的书籍是：《{book_title or '当前书籍'}》。用户提到‘这本书’时，默认就是这本书，不要反问书名。\n"
             "【核心行为准则】：\n"
             "1. 当用户询问关于本书的具体内容、概念、原则或知识点时，你必须且只能通过调用 `search_keyword_tool` 工具进行查阅。\n"
             "2. 严禁基于你自身的先验知识随意编造答案！如果工具返回未找到相关信息，请如实回答“根据本书内容，未查阅到相关记载”。\n"
             "3. 引用工具返回的原文回答时，请在回答末尾明确标注【来源出处】（如：来源 Page X / Lines X-Y）。\n"
-            "4. 系统提示中的‘之前对话的背景摘要’是内部记忆，只用于帮助你理解上下文。严禁在回答中展示、复述或解释这段摘要，严禁输出‘更新后的聊天摘要’等内部标题；始终只回答用户当前这一轮的问题。"
+            "4. 用户要求‘介绍这本书’、‘概括这本书’、‘这本书讲什么’或类似问题时，必须调用 `search_keyword_tool`，使用当前书名和‘全书简介 核心内容 章节 主题’等关键词检索，然后基于检索结果介绍，不要要求用户再次提供书名。\n"
+            "5. 系统提示中的‘之前对话的背景摘要’是内部记忆，只用于帮助你理解上下文。严禁在回答中展示、复述或解释这段摘要，严禁输出‘更新后的聊天摘要’等内部标题；始终只回答用户当前这一轮的问题。"
         )
-
-        if summary:
-            sys_prompt_text = sys_prompt_text + f"\n\n【之前对话的背景摘要】：\n{summary}"
 
         return [SystemMessage(content=sys_prompt_text)] + state['messages']
 

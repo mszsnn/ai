@@ -194,7 +194,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 .source-preview-card { background: #e8e9e0; border: 1px solid #dbddd3; border-radius: 11px; padding: 10px; }
 .source-preview-top, .source-meta-row { align-items: center; display: flex; justify-content: space-between; }
 .source-preview-top { color: var(--green); font-size: 9px; font-weight: 800; letter-spacing: .16em; padding: 3px 4px 10px; }
-.source-paper { background: #fcfbf3; box-shadow: 0 9px 22px rgba(59,63,49,.12); height: 220px; overflow: hidden; padding: 22px 20px; position: relative; }
+.source-paper { background: #fcfbf3; box-shadow: 0 9px 22px rgba(59,63,49,.12); height: auto; overflow: hidden; padding: 22px 20px; position: relative; }
 .source-paper::after { background: #dfe5f8; bottom: -19px; content: ""; height: 74px; position: absolute; right: -24px; transform: rotate(-31deg); width: 120px; }
 .paper-topline { color: #96a1ab; font-size: 8px; font-weight: 800; letter-spacing: .18em; }
 .paper-title { color: #303944; font-family: Georgia, serif; font-size: 34px; letter-spacing: -.08em; line-height: .86; margin-top: 32px; }
