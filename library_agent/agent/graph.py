@@ -1,5 +1,6 @@
 import os
 import sqlite3
+import logging
 from typing import Annotated, TypedDict
 from dotenv import load_dotenv
 
@@ -13,6 +14,9 @@ from langgraph.checkpoint.memory import MemorySaver  # 内存级临时记忆
 from openai import RateLimitError, AuthenticationError, BadRequestError, APIConnectionError
 from pathlib import Path
 from library_agent.agent.tools import agent_tools
+
+
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -84,7 +88,10 @@ class BookAgent:
 
         # 致命错误，不再重试
         except (RateLimitError, AuthenticationError, APIConnectionError) as fatal_err:
-            print(f"[熔断器触发] 遭遇致命物理错误: {type(fatal_err).__name__}")
+            logger.error(
+                "llm_circuit_open",
+                extra={"event": "llm_circuit_open", "error_type": type(fatal_err).__name__},
+            )
             # 伪造一条 AI 消息返回给用户，图网络会在下一步安全走向 END
             error_msg = AIMessage(
                 content="[系统提示] 抱歉，AI 大脑暂时失去连接（可能由于 API 额度耗尽或网络波动）。请稍后再试或联系管理员。"
@@ -93,13 +100,16 @@ class BookAgent:
 
         # 重试， 最多一次
         except BadRequestError as bad_req_err:
-            print(f"[自动自愈] 拦截到上下文错乱 (400): {str(bad_req_err)[:50]}")
+            logger.warning(
+                "llm_bad_request_recovery",
+                extra={"event": "llm_bad_request_recovery", "error_type": type(bad_req_err).__name__},
+            )
             last_msg = state["messages"][-1]
 
             # 熔断保护：检查是不是已经重试过了？
             # 如果最后一条消息已经是我们自己发的容错提示，说明重试失败了，直接放弃！
             if isinstance(last_msg, SystemMessage) and "[系统级容错]" in last_msg.content:
-                print("[熔断器触发] 自愈失败，停止死循环！")
+                logger.error("llm_recovery_aborted", extra={"event": "llm_recovery_aborted"})
                 return {"messages": [AIMessage(
                     content="[系统提示] 对话状态严重异常，系统尝试自愈失败，请尝试开启新的会话 (清空 Thread ID)。")]}
 
@@ -112,7 +122,7 @@ class BookAgent:
                     ]
                 }
         except Exception as unknown_err:
-            print(f"[未知异常] {str(unknown_err)}")
+            logger.exception("llm_unexpected_error", extra={"event": "llm_unexpected_error"})
             return {"messages": [AIMessage(content=f"[系统提示] 发生未知内部错误: {str(unknown_err)}")]}
 
     @staticmethod
@@ -144,17 +154,23 @@ class BookAgent:
             return {'messages': [self._chunk_to_message(response)]}
 
         except (RateLimitError, AuthenticationError, APIConnectionError) as fatal_err:
-            print(f"[熔断器触发] 遭遇致命物理错误: {type(fatal_err).__name__}")
+            logger.error(
+                "llm_circuit_open",
+                extra={"event": "llm_circuit_open", "error_type": type(fatal_err).__name__},
+            )
             return {"messages": [AIMessage(
                 content="[系统提示] 抱歉，AI 大脑暂时失去连接（可能由于 API 额度耗尽或网络波动）。请稍后再试或联系管理员。"
             )]}
 
         except BadRequestError as bad_req_err:
-            print(f"[自动自愈] 拦截到上下文错乱 (400): {str(bad_req_err)[:50]}")
+            logger.warning(
+                "llm_bad_request_recovery",
+                extra={"event": "llm_bad_request_recovery", "error_type": type(bad_req_err).__name__},
+            )
             last_msg = state["messages"][-1]
 
             if isinstance(last_msg, SystemMessage) and "[系统级容错]" in last_msg.content:
-                print("[熔断器触发] 自愈失败，停止死循环！")
+                logger.error("llm_recovery_aborted", extra={"event": "llm_recovery_aborted"})
                 return {"messages": [AIMessage(
                     content="[系统提示] 对话状态严重异常，系统尝试自愈失败，请尝试开启新的会话 (清空 Thread ID)。"
                 )]}
@@ -168,12 +184,12 @@ class BookAgent:
                 }
 
         except Exception as unknown_err:
-            print(f"[未知异常] {str(unknown_err)}")
+            logger.exception("llm_unexpected_error", extra={"event": "llm_unexpected_error"})
             return {"messages": [AIMessage(content=f"[系统提示] 发生未知内部错误: {str(unknown_err)}")]}
 
 
     def _summarize_and_trim(self, state: AgentState):
-        print("[内存回收节点触发] 消息过长！正在压缩记忆...\n")
+        logger.info("memory_compaction_started", extra={"event": "memory_compaction_started"})
 
         summary = state.get('summary', '')
 
@@ -192,7 +208,10 @@ class BookAgent:
             HumanMessage(content=summary_prompt)
         ])
 
-        print(f"[生成记忆胶囊] 新摘要: {new_summary} \n")
+        logger.info(
+            "memory_compaction_completed",
+            extra={"event": "memory_compaction_completed", "summary_chars": len(new_summary.content)},
+        )
 
         # 将原来的删除
         remove_message = [RemoveMessage(id=m.id) for m in messages_to_compress]
@@ -255,7 +274,7 @@ class BookAgent:
         elif use_sqlite:
             connet = sqlite3.connect(db_path, check_same_thread=False)
             compiled_checkpointer = SqliteSaver(connet)
-            print('SQLite 长期持久化已经做好')
+            logger.info("checkpoint_sqlite_ready", extra={"event": "checkpoint_sqlite_ready"})
         else:
             from langgraph.checkpoint.memory import MemorySaver
             compiled_checkpointer = MemorySaver()
@@ -295,4 +314,3 @@ if __name__ == "__main__":
     print(f"[Agent Response]:\n{last_msg.content}")
 
     print("\n" + "=" * 60)
-

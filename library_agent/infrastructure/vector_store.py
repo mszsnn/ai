@@ -4,6 +4,7 @@
 # 2 不同的书本进行物理隔离
 #---------------------
 import os
+import logging
 import chromadb
 from chromadb.utils import embedding_functions
 from dotenv import load_dotenv
@@ -13,6 +14,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DB_PATH = PROJECT_ROOT / "rag_engine" / "db_vector_data"
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 class MultiTenantVectorStore:
 
@@ -29,7 +32,10 @@ class MultiTenantVectorStore:
             model_name="text-embedding-3-small"
         )
 
-        print(f"VectorStore 初始化完成，数据库路径: {db_path} \n")
+        logger.info(
+            "vector_store_ready",
+            extra={"event": "vector_store_ready", "db_path": str(db_path)},
+        )
 
 
 
@@ -40,7 +46,10 @@ class MultiTenantVectorStore:
         # 这里有个细节我们， 很多情况下我们需要重新创建某个 id 的向量空间
         try:
             self.client.delete_collection(name=tenant_id)
-            print(f"已清空原有空间: {tenant_id}，防止 Chunk 策略变更导致脏数据残留。")
+            logger.info(
+                "vector_collection_reset",
+                extra={"event": "vector_collection_reset", "book_id": tenant_id},
+            )
         except (ValueError, chromadb.errors.NotFoundError):
             pass
 
@@ -74,4 +83,3 @@ def get_global_vector_store( db_path: str = DEFAULT_DB_PATH):
     if _global_vector_store is None:
         _global_vector_store = MultiTenantVectorStore(db_path=db_path)
     return _global_vector_store
-

@@ -100,6 +100,15 @@ class LibraryStorage:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def update_book_meta(self, book_id: str, meta: str) -> None:
+        """Refresh display metadata without changing the book identity."""
+        timestamp = _now()
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                "UPDATE books SET meta = ?, updated_at = ? WHERE book_id = ?",
+                (meta, timestamp, book_id),
+            )
+
     def ensure_thread(self, thread_id: str, book_id: str) -> None:
         timestamp = _now()
         with self._lock, self._connect() as connection:

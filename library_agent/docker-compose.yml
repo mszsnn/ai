@@ -1,0 +1,42 @@
+services:
+  backend:
+    build:
+      context: ..
+      dockerfile: library_agent/Dockerfile
+    env_file:
+      - .env
+    environment:
+      VECTOR_DB_PATH: /data/chroma
+      CHECKPOINT_DB_PATH: /data/checkpoints.sqlite
+      LIBRARY_DB_PATH: /data/library.sqlite3
+      UPLOAD_DIR: /data/uploads
+      CORS_ORIGINS: http://localhost:8080,http://127.0.0.1:8080
+    expose:
+      - "8000"
+    volumes:
+      - library_agent_data:/data
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    expose:
+      - "3000"
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:1.27-alpine
+    depends_on:
+      backend:
+        condition: service_healthy
+      frontend:
+        condition: service_started
+    ports:
+      - "8080:80"
+    volumes:
+      - ./deploy/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    restart: unless-stopped
+
+volumes:
+  library_agent_data:

@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import re
+from time import perf_counter
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,11 +25,14 @@ from langchain_core.messages import HumanMessage, ToolMessage
 from pydantic import BaseModel, Field, field_validator
 
 from library_agent.agent.graph import BookAgent
+from library_agent.api.logging_config import configure_logging, request_id_context
 from library_agent.api.storage import LibraryStorage
 from library_agent.infrastructure.vector_store import get_global_vector_store
+from library_agent.rag_engine.document_loader import get_pdf_page_count
 from library_agent.rag_engine.vector_pipeline import VectorPipeline
 
 
+configure_logging()
 logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 BOOK_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{1,62}$")
@@ -98,6 +102,7 @@ class UploadResponse(BaseModel):
     book_id: str
     filename: str
     chunks: int
+    pages: int | None = None
     message: str
 
 
@@ -160,18 +165,37 @@ def _agent_state(request: ChatRequest) -> tuple[dict, str]:
 
 
 async def _chat_events(request: Request, payload: ChatRequest) -> AsyncGenerator[str, None]:
-    agent_app = getattr(request.app.state, "agent_app", None)
-    if agent_app is None:
-        yield _sse({"type": "error", "message": "Agent 尚未完成初始化"}, event="error")
-        return
-
+    request_id = getattr(request.state, "request_id", uuid4().hex)
+    request_token = request_id_context.set(request_id)
+    started_at = perf_counter()
     config, thread_id = _agent_state(payload)
-    yield _sse({"type": "start", "thread_id": thread_id, "book_id": payload.book_id}, event="start")
-
+    config["configurable"]["request_id"] = request_id
     emitted_text = False
     status_emitted = False
+    token_events = 0
     answer = ""
+
     try:
+        agent_app = getattr(request.app.state, "agent_app", None)
+        logger.info(
+            "chat_started",
+            extra={
+                "event": "chat_started",
+                "book_id": payload.book_id,
+                "thread_id": thread_id,
+                "message_chars": len(payload.message),
+            },
+        )
+        if agent_app is None:
+            logger.error(
+                "chat_rejected_agent_not_ready",
+                extra={"event": "chat_rejected", "book_id": payload.book_id, "thread_id": thread_id},
+            )
+            yield _sse({"type": "error", "message": "Agent 尚未完成初始化"}, event="error")
+            return
+
+        yield _sse({"type": "start", "thread_id": thread_id, "book_id": payload.book_id}, event="start")
+
         library_storage = getattr(request.app.state, "library_storage", None)
         if library_storage is not None:
             await asyncio.to_thread(library_storage.ensure_thread, thread_id, payload.book_id)
@@ -190,6 +214,16 @@ async def _chat_events(request: Request, payload: ChatRequest) -> AsyncGenerator
             version="v2",
         ):
             if await request.is_disconnected():
+                logger.warning(
+                    "chat_client_disconnected",
+                    extra={
+                        "event": "chat_client_disconnected",
+                        "book_id": payload.book_id,
+                        "thread_id": thread_id,
+                        "answer_chars": len(answer),
+                        "duration_ms": round((perf_counter() - started_at) * 1000, 2),
+                    },
+                )
                 return
 
             part_type = part.get("type")
@@ -215,6 +249,15 @@ async def _chat_events(request: Request, payload: ChatRequest) -> AsyncGenerator
                 )
                 if tool_chunks and not status_emitted:
                     status_emitted = True
+                    logger.info(
+                        "chat_retrieval_started",
+                        extra={
+                            "event": "chat_retrieval_started",
+                            "book_id": payload.book_id,
+                            "thread_id": thread_id,
+                            "tool": "search_keyword_tool",
+                        },
+                    )
                     yield _sse(
                         {"type": "status", "message": "正在检索书本内容…", "tool": "search_keyword_tool"},
                         event="status",
@@ -223,6 +266,7 @@ async def _chat_events(request: Request, payload: ChatRequest) -> AsyncGenerator
                 token = _content_to_text(getattr(message_chunk, "content", ""))
                 if token:
                     answer += token
+                    token_events += 1
                     emitted_text = True
                     yield _sse({"type": "token", "content": token}, event="token")
 
@@ -240,6 +284,15 @@ async def _chat_events(request: Request, payload: ChatRequest) -> AsyncGenerator
                     for message in node_state.get("messages", []):
                         if getattr(message, "tool_calls", None) and not status_emitted:
                             status_emitted = True
+                            logger.info(
+                                "chat_retrieval_started",
+                                extra={
+                                    "event": "chat_retrieval_started",
+                                    "book_id": payload.book_id,
+                                    "thread_id": thread_id,
+                                    "tool": "search_keyword_tool",
+                                },
+                            )
                             yield _sse(
                                 {"type": "status", "message": "正在检索书本内容…", "tool": "search_keyword_tool"},
                                 event="status",
@@ -249,6 +302,7 @@ async def _chat_events(request: Request, payload: ChatRequest) -> AsyncGenerator
                             text = _content_to_text(getattr(message, "content", ""))
                             if text:
                                 answer += text
+                                token_events += 1
                                 emitted_text = True
                                 yield _sse({"type": "token", "content": text}, event="token")
 
@@ -261,16 +315,48 @@ async def _chat_events(request: Request, payload: ChatRequest) -> AsyncGenerator
                 "assistant",
                 answer,
             )
+        logger.info(
+            "chat_completed",
+            extra={
+                "event": "chat_completed",
+                "book_id": payload.book_id,
+                "thread_id": thread_id,
+                "answer_chars": len(answer),
+                "token_events": token_events,
+                "duration_ms": round((perf_counter() - started_at) * 1000, 2),
+            },
+        )
         yield _sse({"type": "done", "thread_id": thread_id}, event="done")
 
     except asyncio.CancelledError:
+        logger.warning(
+            "chat_cancelled",
+            extra={
+                "event": "chat_cancelled",
+                "book_id": payload.book_id,
+                "thread_id": thread_id,
+                "answer_chars": len(answer),
+                "duration_ms": round((perf_counter() - started_at) * 1000, 2),
+            },
+        )
         raise
     except Exception:
-        logger.exception("Chat stream failed for book_id=%s", payload.book_id)
+        logger.exception(
+            "chat_failed",
+            extra={
+                "event": "chat_failed",
+                "book_id": payload.book_id,
+                "thread_id": thread_id,
+                "answer_chars": len(answer),
+                "duration_ms": round((perf_counter() - started_at) * 1000, 2),
+            },
+        )
         yield _sse(
             {"type": "error", "message": "对话处理失败，请稍后重试"},
             event="error",
         )
+    finally:
+        request_id_context.reset(request_token)
 
 
 def _store_uploaded_file(upload_dir: Path, book_id: str, upload: UploadFile) -> tuple[Path, str]:
@@ -298,6 +384,11 @@ def _ingest_file(pipeline: VectorPipeline, vector_store, path: Path, book_id: st
     return vector_store.get_collection_by_tenant_id(book_id).count()
 
 
+def _display_meta(path: Path, pages: int | None) -> str:
+    suffix = path.suffix.upper().lstrip(".") or "FILE"
+    return f"{suffix} · {pages} pages" if pages is not None else f"{suffix} · indexed"
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = RuntimeSettings.from_environment()
@@ -311,18 +402,7 @@ async def lifespan(app: FastAPI):
     pipeline = VectorPipeline(vector_store=vector_store)
     library_storage = LibraryStorage(settings.library_db_path)
 
-    # Keep the original bundled book visible after the frontend switches to
-    # loading the shelf from the backend.
     known_books = {book["id"] for book in library_storage.list_books()}
-    if "agile_project_management" not in known_books:
-        library_storage.upsert_book(
-            book_id="agile_project_management",
-            title="敏捷项目管理",
-            meta="PDF · 40 pages",
-            filename="敏捷项目管理.pdf",
-            chunks=0,
-        )
-        known_books.add("agile_project_management")
 
     # Recover metadata for files uploaded before the metadata database was
     # introduced. The original filename is not available in that case, so the
@@ -334,14 +414,32 @@ async def lifespan(app: FastAPI):
         if not files:
             continue
         source = files[0]
-        suffix = source.suffix.upper().lstrip(".") or "FILE"
+        pages = get_pdf_page_count(str(source)) if source.suffix.lower() == ".pdf" else None
         library_storage.upsert_book(
             book_id=book_dir.name,
             title=book_dir.name.replace("_", " ").replace("-", " ").title(),
-            meta=f"{suffix} · indexed",
+            meta=_display_meta(source, pages),
             filename=source.name,
             chunks=0,
         )
+
+    # Normalize metadata for books that were already in the database before
+    # page counts became the shelf display format.
+    bundled_source = PROJECT_ROOT / "rag_engine" / "敏捷项目管理.pdf"
+    if bundled_source.exists() and "agile_project_management" in known_books:
+        library_storage.update_book_meta(
+            "agile_project_management",
+            _display_meta(bundled_source, get_pdf_page_count(str(bundled_source))),
+        )
+    for book_dir in settings.upload_dir.iterdir():
+        if not book_dir.is_dir() or book_dir.name not in known_books:
+            continue
+        sources = [path for path in book_dir.iterdir() if path.is_file()]
+        if not sources:
+            continue
+        source = sources[0]
+        pages = get_pdf_page_count(str(source)) if source.suffix.lower() == ".pdf" else None
+        library_storage.update_book_meta(book_dir.name, _display_meta(source, pages))
 
     # The async checkpointer is required by astream_events/astream so the API
     # does not block on SQLite while a client is receiving tokens.
@@ -366,6 +464,41 @@ def create_app() -> FastAPI:
         version="0.3.0",
         lifespan=lifespan,
     )
+
+    @app.middleware("http")
+    async def request_context(request: Request, call_next):
+        incoming_request_id = request.headers.get("X-Request-ID", "").strip()
+        request_id = (incoming_request_id[:128] or uuid4().hex)
+        request.state.request_id = request_id
+        request_token = request_id_context.set(request_id)
+        started_at = perf_counter()
+        try:
+            response = await call_next(request)
+            response.headers["X-Request-ID"] = request_id
+            logger.info(
+                "http_response_started",
+                extra={
+                    "event": "http_response_started",
+                    "method": request.method,
+                    "path": request.url.path,
+                    "status_code": response.status_code,
+                    "duration_ms": round((perf_counter() - started_at) * 1000, 2),
+                },
+            )
+            return response
+        except Exception:
+            logger.exception(
+                "http_request_failed",
+                extra={
+                    "event": "http_request_failed",
+                    "method": request.method,
+                    "path": request.url.path,
+                    "duration_ms": round((perf_counter() - started_at) * 1000, 2),
+                },
+            )
+            raise
+        finally:
+            request_id_context.reset(request_token)
 
     settings = RuntimeSettings.from_environment()
     allow_all_origins = settings.cors_origins == ("*",)
@@ -434,6 +567,15 @@ def create_app() -> FastAPI:
         if pipeline is None or vector_store is None:
             raise HTTPException(status_code=503, detail="服务尚未完成初始化")
 
+        upload_started_at = perf_counter()
+        logger.info(
+            "upload_started",
+            extra={
+                "event": "upload_started",
+                "book_id": book_id,
+                "upload_filename": Path(file.filename or "document").name,
+            },
+        )
         try:
             path, original_name = await asyncio.to_thread(
                 _store_uploaded_file,
@@ -441,30 +583,58 @@ def create_app() -> FastAPI:
                 book_id,
                 file,
             )
+            pages = (
+                await asyncio.to_thread(get_pdf_page_count, str(path))
+                if path.suffix.lower() == ".pdf"
+                else None
+            )
             chunks = await asyncio.to_thread(_ingest_file, pipeline, vector_store, path, book_id)
             library_storage = getattr(request.app.state, "library_storage", None)
             if library_storage is not None:
-                suffix = Path(original_name).suffix.upper().lstrip(".") or "FILE"
                 await asyncio.to_thread(
                     library_storage.upsert_book,
                     book_id,
                     Path(original_name).stem,
-                    f"{suffix} · {chunks} chunks",
+                    _display_meta(path, pages),
                     original_name,
                     chunks,
                 )
         except ValueError as exc:
+            logger.warning(
+                "upload_rejected",
+                extra={"event": "upload_rejected", "book_id": book_id, "reason": str(exc)},
+            )
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:
-            logger.exception("Ingestion failed for book_id=%s", book_id)
+            logger.exception(
+                "upload_failed",
+                extra={
+                    "event": "upload_failed",
+                    "book_id": book_id,
+                    "duration_ms": round((perf_counter() - upload_started_at) * 1000, 2),
+                },
+            )
             raise HTTPException(status_code=500, detail="文件解析或向量入库失败") from exc
         finally:
             await file.close()
+
+        logger.info(
+            "upload_completed",
+            extra={
+                "event": "upload_completed",
+                "book_id": book_id,
+                "upload_filename": original_name,
+                "chunks": chunks,
+                "pages": pages,
+                "duration_ms": round((perf_counter() - upload_started_at) * 1000, 2),
+            },
+        )
 
         return UploadResponse(
             book_id=book_id,
             filename=original_name,
             chunks=chunks,
+            pages=pages,
             message="文件上传并建库成功，现在可以开始对话",
         )
 

@@ -1,3 +1,10 @@
+import logging
+from time import perf_counter
+
+
+logger = logging.getLogger(__name__)
+
+
 # 检索
 
 class VectorSearching:
@@ -12,16 +19,42 @@ class VectorSearching:
         """
         核心检索逻辑： 自然语言转化为向量， 进行 cos 相似匹配
         """
-        print(f"正在进行匹配： 在知识库 {self.tenant_id}中查找: '{keyword}' ")
-
-        results = self.collection.query(
-            query_texts = [keyword],
-            n_results=top_k
+        started_at = perf_counter()
+        logger.info(
+            "vector_search_started",
+            extra={
+                "event": "vector_search_started",
+                "book_id": self.tenant_id,
+                "keyword_preview": keyword[:160],
+                "top_k": top_k,
+            },
         )
+
+        try:
+            results = self.collection.query(
+                query_texts=[keyword],
+                n_results=top_k,
+            )
+        except Exception:
+            logger.exception(
+                "vector_search_failed",
+                extra={"event": "vector_search_failed", "book_id": self.tenant_id},
+            )
+            raise
 
         documents = results['documents'][0]
         metadatas = results['metadatas'][0]
         distances = results['distances'][0]
+
+        logger.info(
+            "vector_search_completed",
+            extra={
+                "event": "vector_search_completed",
+                "book_id": self.tenant_id,
+                "result_count": len(documents),
+                "duration_ms": round((perf_counter() - started_at) * 1000, 2),
+            },
+        )
 
         return zip(documents, metadatas, distances)
 

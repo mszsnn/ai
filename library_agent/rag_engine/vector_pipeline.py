@@ -1,5 +1,7 @@
 # 真正将文本存储到数据库中
 
+import logging
+
 from library_agent.infrastructure.vector_store import MultiTenantVectorStore
 from library_agent.rag_engine.document_loader import (
     PDFParser,
@@ -64,7 +66,15 @@ class VectorPipeline:
                     ids=batch_ids
                 )
                 batch_index = batch_index + 1
-                print(f"已成功写入第 {batch_index} 批，累计 {global_chunk_index} 个知识块...\n")
+                logging.getLogger(__name__).info(
+                    "vector_ingest_batch_completed",
+                    extra={
+                        "event": "vector_ingest_batch_completed",
+                        "book_id": book_id,
+                        "batch": batch_index,
+                        "chunks": global_chunk_index,
+                    },
+                )
                 # 清空
                 batch_texts, batch_metadatas, batch_ids= [], [], []
 
@@ -76,7 +86,14 @@ class VectorPipeline:
                 ids=batch_ids
             )
 
-        print(f"已成功写入最后一批次，累计 {global_chunk_index} 个知识块...\n")
+        logging.getLogger(__name__).info(
+            "vector_ingest_completed",
+            extra={
+                "event": "vector_ingest_completed",
+                "book_id": book_id,
+                "chunks": global_chunk_index,
+            },
+        )
 
 
 
@@ -97,4 +114,3 @@ if __name__ == '__main__':
     collection = vs.get_collection_by_tenant_id(test_book_id)
     count = collection.count()
     print(f"验证成功！目前共有 {count} 条属于 {test_book_id} 的知识块。")
-

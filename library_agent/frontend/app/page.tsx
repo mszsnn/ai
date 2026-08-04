@@ -4,8 +4,6 @@ import {
   ArrowUp,
   BookOpen,
   Check,
-  ChevronDown,
-  Clock3,
   FileText,
   FolderOpen,
   LibraryBig,
@@ -58,17 +56,6 @@ const API_BASE =
   typeof process !== "undefined" && process.env.NEXT_PUBLIC_API_BASE_URL
     ? process.env.NEXT_PUBLIC_API_BASE_URL
     : "";
-
-const starterBooks: Book[] = [
-  {
-    id: "agile_project_management",
-    title: "敏捷项目管理",
-    meta: "PDF · 40 pages",
-    color: "#dbe8ff",
-    accent: "#4d6fff",
-    indexed: true,
-  },
-];
 
 const starterMessages: Message[] = [
   {
@@ -129,6 +116,33 @@ function extractCitations(content: string) {
   return Array.from(new Set(content.match(/Page\s+\d+/gi) ?? []));
 }
 
+function getPreviewTitle(title: string) {
+  const normalized = title.trim() || "Untitled book";
+  const words = normalized.split(/\s+/);
+  if (words.length > 1) {
+    return { firstLine: words[0], secondLine: words.slice(1).join(" ") };
+  }
+
+  const midpoint = Math.ceil(normalized.length / 2);
+  return {
+    firstLine: normalized.slice(0, midpoint),
+    secondLine: normalized.slice(midpoint),
+  };
+}
+
+function getSourcePreview(book?: Book) {
+  const meta = book?.meta ?? "SOURCE";
+  const [type = "SOURCE", detail = ""] = meta.split("·").map((part) => part.trim());
+  const pageMatch = detail.match(/(\d+)\s+pages?/i);
+  return {
+    type: type.toUpperCase(),
+    detail: detail ? detail.toUpperCase() : "BOOK SOURCE",
+    page: pageMatch?.[1] ?? "—",
+    title: getPreviewTitle(book?.title ?? "Untitled book"),
+    indexed: book?.indexed ?? false,
+  };
+}
+
 function MessageBubble({ message }: { message: Message }) {
   const citations = message.role === "assistant" ? extractCitations(message.content) : [];
 
@@ -172,16 +186,16 @@ function MessageBubble({ message }: { message: Message }) {
 }
 
 export default function Home() {
-  const [books, setBooks] = useState<Book[]>(starterBooks);
-  const [selectedBookId, setSelectedBookId] = useState(starterBooks[0].id);
+  const [books, setBooks] = useState<Book[]>([]);
+  const [selectedBookId, setSelectedBookId] = useState("");
   const [messages, setMessages] = useState<Message[]>(starterMessages);
   const [draft, setDraft] = useState("");
   const [search, setSearch] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
-  const [streamStatus, setStreamStatus] = useState("Ready when you are");
   const [uploadStatus, setUploadStatus] = useState<string | null>(null);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const messageListRef = useRef<HTMLDivElement>(null);
   const threadIdsRef = useRef<Record<string, string>>({});
 
   function getThreadId(bookId: string) {
@@ -199,11 +213,9 @@ export default function Home() {
         if (cancelled || remoteBooks.length === 0) return;
 
         setBooks(remoteBooks.map(decorateBook));
-        setSelectedBookId((current) =>
-          remoteBooks.some((book) => book.id === current) ? current : remoteBooks[0].id,
-        );
+        setSelectedBookId(remoteBooks[0].id);
       } catch {
-        // Keep the bundled starter shelf visible while the API is starting.
+        // Keep the shelf empty until the API is available.
       }
     }
 
@@ -239,7 +251,14 @@ export default function Home() {
     };
   }, [selectedBookId]);
 
+  useEffect(() => {
+    const messageList = messageListRef.current;
+    if (!messageList) return;
+    messageList.scrollTop = messageList.scrollHeight;
+  }, [messages]);
+
   const activeBook = books.find((book) => book.id === selectedBookId) ?? books[0];
+  const sourcePreview = getSourcePreview(activeBook);
   const filteredBooks = useMemo(
     () =>
       books.filter((book) =>
@@ -251,7 +270,6 @@ export default function Home() {
   function selectBook(bookId: string) {
     setSelectedBookId(bookId);
     setMobileSidebarOpen(false);
-    setStreamStatus("Ready when you are");
   }
 
   async function handleUpload(event: ChangeEvent<HTMLInputElement>) {
@@ -270,7 +288,7 @@ export default function Home() {
         method: "POST",
         body: formData,
       });
-      const result = (await response.json()) as { detail?: string; chunks?: number };
+      const result = (await response.json()) as { detail?: string; chunks?: number; pages?: number };
       if (!response.ok) {
         throw new Error(result.detail || "Upload failed");
       }
@@ -278,7 +296,9 @@ export default function Home() {
       const nextBook: Book = {
         id: bookId,
         title: file.name.replace(/\.[^/.]+$/, ""),
-        meta: `${file.name.toUpperCase().split(".").pop()} · ${result.chunks ?? 0} chunks`,
+        meta: result.pages
+          ? `${file.name.toUpperCase().split(".").pop()} · ${result.pages} pages`
+          : `${file.name.toUpperCase().split(".").pop()} · indexed`,
         color: "#e7defe",
         accent: "#8765db",
         indexed: true,
@@ -313,7 +333,6 @@ export default function Home() {
     ]);
     setDraft("");
     setIsStreaming(true);
-    setStreamStatus("Thinking with your book…");
     const threadId = getThreadId(activeBook.id);
 
     try {
@@ -349,13 +368,10 @@ export default function Home() {
           if (frame.event === "token") {
             answer += frame.data.content ?? "";
             updateAssistantMessage(assistantId, answer);
-            setStreamStatus("Writing from the source…");
           } else if (frame.event === "status") {
-            setStreamStatus("Searching the book…");
+            // Status events are kept for the stream protocol, but are not rendered in the compact UI.
           } else if (frame.event === "error") {
             throw new Error(frame.data.message || "The agent could not finish");
-          } else if (frame.event === "done") {
-            setStreamStatus("Answer grounded in your library");
           }
         }
 
@@ -369,7 +385,6 @@ export default function Home() {
         error instanceof Error ? error.message : "Something went wrong. Please try again.",
         false,
       );
-      setStreamStatus("Connection needs attention");
     } finally {
       setIsStreaming(false);
     }
@@ -463,9 +478,9 @@ export default function Home() {
             <span>Your sources stay yours.</span>
           </div>
           <div className="profile-row">
-            <div className="profile-avatar">MS</div>
+            <div className="profile-avatar">读</div>
             <div>
-              <strong>Reader mode</strong>
+              <strong>志同道合的读者</strong>
               <small>Local workspace</small>
             </div>
             <MoreHorizontal size={17} className="muted-icon" />
@@ -476,27 +491,13 @@ export default function Home() {
       {mobileSidebarOpen ? <button className="sidebar-scrim" onClick={() => setMobileSidebarOpen(false)} aria-label="关闭菜单" /> : null}
 
       <section className="workspace">
-        <header className="topbar">
-          <div className="topbar-left">
-            <button className="icon-button mobile-menu" onClick={() => setMobileSidebarOpen(true)} aria-label="打开书架">
-              <Menu size={19} />
-            </button>
-            <div className="breadcrumb">
-              <span>My library</span>
-              <ChevronDown size={13} />
-              <strong>{activeBook?.title ?? "New book"}</strong>
-            </div>
-          </div>
-          <div className="topbar-right">
-            <span className="connection-dot" />
-            <span className="connection-label">Agent online</span>
-            <button className="quiet-button"><Clock3 size={15} /> History</button>
-            <button className="quiet-button icon-only" aria-label="更多操作"><MoreHorizontal size={17} /></button>
-          </div>
-        </header>
-
         <div className="workspace-grid">
           <section className="chat-column">
+            <div className="mobile-chatbar">
+              <button className="icon-button mobile-menu" onClick={() => setMobileSidebarOpen(true)} aria-label="打开书架">
+                <Menu size={19} />
+              </button>
+            </div>
             <div className="welcome-panel">
               <div className="welcome-orbit orbit-one" />
               <div className="welcome-orbit orbit-two" />
@@ -504,30 +505,11 @@ export default function Home() {
                 <div className="eyebrow"><span className="eyebrow-line" /> CURRENT READING SPACE</div>
                 <h1>读得更深，<em>答案自带出处。</em></h1>
                 <p>向你的书提问。Library Agent 会先检索原文，再给你一个有根据的回答。</p>
-                <div className="suggestion-row">
-                  {[
-                    "这本书的核心观点是什么？",
-                    "总结这一章的关键实践",
-                    "有哪些值得质疑的地方？",
-                  ].map((suggestion) => (
-                    <button key={suggestion} onClick={() => setDraft(suggestion)}>
-                      {suggestion}
-                    </button>
-                  ))}
-                </div>
               </div>
               <div className="welcome-numeral">01</div>
             </div>
 
-            <div className="thread-toolbar">
-              <div>
-                <span className="section-kicker">ACTIVE THREAD</span>
-                <h2>和《{activeBook?.title ?? "这本书"}》对话</h2>
-              </div>
-              <span className="thread-status"><span className="status-pulse" /> {streamStatus}</span>
-            </div>
-
-            <div className="message-list">
+            <div className="message-list" ref={messageListRef}>
               {messages.map((message) => <MessageBubble key={message.id} message={message} />)}
             </div>
 
@@ -559,63 +541,53 @@ export default function Home() {
           </section>
 
           <aside className="reference-column">
-            <div className="reference-header">
-              <div>
-                <span className="section-kicker">SOURCE TRAIL</span>
-                <h2>阅读上下文</h2>
+            <header className="topbar">
+              <div className="topbar-right">
+                <span className="connection-dot" />
+                <span className="connection-label">Agent online</span>
+                <button className="icon-button" aria-label="更多操作"><MoreHorizontal size={17} /></button>
               </div>
-              <button className="icon-button" aria-label="打开来源文件"><FolderOpen size={17} /></button>
-            </div>
+            </header>
 
-            <div className="source-preview-card">
-              <div className="source-preview-top">
-                <span className="source-type">PDF / INDEXED</span>
-                <Check size={15} />
-              </div>
-              <div className="source-paper">
-                <div className="paper-topline">AGILE PROJECT MANAGEMENT</div>
-                <div className="paper-title">敏捷<br /><span>项目管理</span></div>
-                <div className="paper-rule" />
-                <div className="paper-caption">VALUE · TEAM · ADAPT</div>
-                <div className="paper-page">40</div>
-              </div>
-              <div className="source-meta-row">
+            <div className="reference-content">
+              <div className="reference-header">
                 <div>
-                  <small>ACTIVE SOURCE</small>
-                  <strong>{activeBook?.title ?? "Untitled book"}</strong>
+                  <span className="section-kicker">SOURCE TRAIL</span>
+                  <h2>阅读上下文</h2>
                 </div>
-                <span className="source-ready"><span className="status-pulse" /> Ready</span>
+                <button className="icon-button" aria-label="打开来源文件"><FolderOpen size={17} /></button>
               </div>
-            </div>
 
-            <div className="reference-section">
-              <div className="reference-section-heading">
-                <span>RECENT REFERENCES</span>
-                <span className="reference-count">03</span>
+              <div className="source-preview-card">
+                <div className="source-preview-top">
+                  <span className="source-type">{sourcePreview.type} / {sourcePreview.indexed ? "INDEXED" : "PROCESSING"}</span>
+                  {sourcePreview.indexed ? <Check size={15} /> : <LoaderCircle size={15} className="spin" />}
+                </div>
+                <div className="source-paper">
+                  <div className="paper-topline">{activeBook?.title?.toUpperCase() ?? "BOOK"}</div>
+                  <div className="paper-title">
+                    {sourcePreview.title.firstLine}
+                    {sourcePreview.title.secondLine ? <><br /><span>{sourcePreview.title.secondLine}</span></> : null}
+                  </div>
+                  <div className="paper-rule" />
+                  <div className="paper-caption">{sourcePreview.detail}</div>
+                  <div className="paper-page">{sourcePreview.page}</div>
+                </div>
+                <div className="source-meta-row">
+                  <div>
+                    <small>ACTIVE SOURCE</small>
+                    <strong>{activeBook?.title ?? "Untitled book"}</strong>
+                  </div>
+                  <span className="source-ready"><span className="status-pulse" /> {sourcePreview.indexed ? "Ready" : "Indexing"}</span>
+                </div>
               </div>
-              <div className="reference-list">
-                {[
-                  { page: "Page 40", title: "价值、团队和适应", note: "Core values" },
-                  { page: "Page 37", title: "敏捷价值观的来源", note: "Manifesto context" },
-                  { page: "Page 36", title: "敏捷领导力价值观", note: "Leadership" },
-                ].map((reference, index) => (
-                  <button className="reference-item" key={reference.page}>
-                    <span className="reference-index">0{index + 1}</span>
-                    <span className="reference-copy">
-                      <strong>{reference.title}</strong>
-                      <small>{reference.note}</small>
-                    </span>
-                    <span className="reference-page">{reference.page}</span>
-                  </button>
-                ))}
-              </div>
-            </div>
 
-            <div className="insight-card">
-              <div className="insight-icon"><Sparkles size={16} /></div>
-              <div>
-                <span className="section-kicker">READING TIP</span>
-                <p>试试让 Agent 比较两段原文，或追问它的答案有哪些证据支持。</p>
+              <div className="insight-card">
+                <div className="insight-icon"><Sparkles size={16} /></div>
+                <div>
+                  <span className="section-kicker">READING TIP</span>
+                  <p>试试让 Agent 比较两段原文，或追问它的答案有哪些证据支持。</p>
+                </div>
               </div>
             </div>
           </aside>

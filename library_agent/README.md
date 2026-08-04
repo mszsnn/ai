@@ -46,6 +46,14 @@ uvicorn library_agent.api.server:app --reload
 
 书籍元数据和前端展示用的聊天消息保存在 `data/library.sqlite3`，上传文件保存在 `uploads/`，LangGraph 的上下文记忆仍保存在 `agent/checkpoints.sqlite`。这些本地运行数据已加入 `.gitignore`，不会进入 Git 提交。生产部署时需要将 `data/`、`uploads/` 和相关 SQLite 文件挂载到持久化卷。
 
+应用日志统一以 JSON Lines 输出到标准输出，包含 `event`、`request_id`、`book_id`、`thread_id`、耗时和异常堆栈等字段。可通过 `LOG_LEVEL=DEBUG` 临时提高日志级别；Docker 部署时可用以下命令查看后端日志：
+
+```bash
+docker compose -f library_agent/docker-compose.yml logs -f backend
+```
+
+聊天链路常见事件包括 `chat_started`、`chat_retrieval_started`、`chat_completed`、`chat_failed` 和 `chat_client_disconnected`。
+
 `book_id` 会直接作为 Chroma Collection 名称，必须是 3-63 位、以字母或数字开头和结尾，只能包含字母、数字、下划线和连字符。
 
 
@@ -66,10 +74,26 @@ uvicorn library_agent.api.server:app --reload
 
 第五阶段：容器化与云端部署 (Production Deployment)
 
-[ ] TODO 5.1：编写工业级 Dockerfile
+[x] TODO 5.1：编写工业级 Dockerfile
 
-打包 Python 环境，处理好 SQLite 数据卷（Volume）映射和 ChromaDB 的持久化目录挂载，确保容器重启数据不丢。
+已完成 Python 后端镜像、非 root 运行用户、健康检查和 `/data` 持久化卷。`/data/chroma`、`/data/uploads`、`/data/library.sqlite3`、`/data/checkpoints.sqlite` 会随容器重启保留。
 
-[ ] TODO 5.2：Docker Compose 与 Nginx 反向代理
+[x] TODO 5.2：Docker Compose 与 Nginx 反向代理
 
-一键拉起后端服务，配置 Nginx 转发 SSE 流式请求，解决生产环境的网络超时与跨域问题。
+已完成前端 Node SSR 服务、FastAPI 后端、Nginx 网关和 SSE 代理配置。Nginx 会将 `/api` 转发到后端并关闭响应缓冲，避免流式回答被攒到最后才显示。
+
+### 第五阶段启动
+
+先准备 `library_agent/.env`，至少填写模型和向量服务所需的密钥，然后在仓库根目录执行：
+
+```bash
+docker compose -f library_agent/docker-compose.yml up --build
+```
+
+浏览器访问 `http://localhost:8080`。停止服务但保留数据：
+
+```bash
+docker compose -f library_agent/docker-compose.yml down
+```
+
+不要随意使用 `down -v`，它会删除 `library_agent_data` 卷中的书籍、向量库和聊天记录。首次构建会把仓库里的 Chroma 数据作为种子复制到持久化卷；之后容器重启不会覆盖用户新上传的数据。

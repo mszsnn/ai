@@ -37,10 +37,24 @@ class BaseDocumentParser(ABC):
 # pdf 和 TXT 解析
 # ==========================================
 
+def get_pdf_page_count(file_path: str) -> int:
+    """Return the page count and fail clearly for password-protected PDFs."""
+    pdf_doc = fitz.open(file_path)
+    try:
+        if pdf_doc.needs_pass:
+            raise ValueError("PDF 受密码保护，请先解除密码后再上传")
+        return pdf_doc.page_count
+    finally:
+        pdf_doc.close()
+
 class PDFParser(BaseDocumentParser):
     """ 基于原始页码解析 """
     def text_stream(self) -> Iterator[Dict[str, Any]]:
         pdf_doc = fitz.open(self.file_path)
+
+        if pdf_doc.needs_pass:
+            pdf_doc.close()
+            raise ValueError("PDF 受密码保护，请先解除密码后再上传")
 
         for page_number, page in enumerate(pdf_doc, 1):
             # 要纯文本输出

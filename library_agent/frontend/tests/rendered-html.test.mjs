@@ -35,7 +35,7 @@ test("server-renders the library workspace", async () => {
   assert.match(html, /我的书架/);
   assert.match(html, /读得更深/);
   assert.match(html, /Ask a question about this book/);
-  assert.match(html, /敏捷项目管理/);
+  assert.doesNotMatch(html, /敏捷项目管理/);
   assert.doesNotMatch(html, /Your site is taking shape|codex-preview|SkeletonPreview/);
 });
 
