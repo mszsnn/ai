@@ -37,6 +37,12 @@ logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 BOOK_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{1,62}$")
 SUPPORTED_SUFFIXES = {".pdf", ".txt"}
+INTERNAL_OUTPUT_MARKERS = (
+    "更新后的聊天摘要",
+    "【更新后的聊天摘要】",
+    "之前对话的背景摘要",
+    "【之前对话的背景摘要】",
+)
 
 
 def _resolve_path(value: str | None, default: Path) -> Path:
@@ -153,6 +159,58 @@ def _content_to_text(content) -> str:
     return "".join(text_parts)
 
 
+class _AssistantOutputFilter:
+    """Prevent internal memory headings from leaking into user-visible output."""
+
+    def __init__(self) -> None:
+        self._pending = ""
+        self._blocked = False
+
+    def feed(self, text: str) -> str:
+        if not text or self._blocked:
+            return ""
+
+        self._pending += text
+        marker_index = min(
+            (
+                self._pending.find(marker)
+                for marker in INTERNAL_OUTPUT_MARKERS
+                if self._pending.find(marker) >= 0
+            ),
+            default=-1,
+        )
+        if marker_index >= 0:
+            visible = self._pending[:marker_index]
+            self._pending = ""
+            self._blocked = True
+            return visible
+
+        # Keep a possible partial marker buffered because streaming chunks can
+        # split a Chinese heading across multiple model events.
+        keep = 0
+        for marker in INTERNAL_OUTPUT_MARKERS:
+            for prefix_length in range(1, min(len(marker), len(self._pending) + 1)):
+                if self._pending.endswith(marker[:prefix_length]):
+                    keep = max(keep, prefix_length)
+        if keep == 0:
+            visible, self._pending = self._pending, ""
+        else:
+            visible = self._pending[:-keep]
+            self._pending = self._pending[-keep:]
+        return visible
+
+    def flush(self) -> str:
+        if self._blocked:
+            return ""
+        visible, self._pending = self._pending, ""
+        return visible
+
+
+def _sanitize_assistant_output(content: str) -> str:
+    output_filter = _AssistantOutputFilter()
+    return output_filter.feed(content) + output_filter.flush()
+
+
 def _agent_state(request: ChatRequest) -> tuple[dict, str]:
     thread_id = request.thread_id or uuid4().hex
     config = {
@@ -174,6 +232,7 @@ async def _chat_events(request: Request, payload: ChatRequest) -> AsyncGenerator
     status_emitted = False
     token_events = 0
     answer = ""
+    answer_filter = _AssistantOutputFilter()
 
     try:
         agent_app = getattr(request.app.state, "agent_app", None)
@@ -265,10 +324,12 @@ async def _chat_events(request: Request, payload: ChatRequest) -> AsyncGenerator
 
                 token = _content_to_text(getattr(message_chunk, "content", ""))
                 if token:
-                    answer += token
+                    visible_token = answer_filter.feed(token)
+                    answer += visible_token
                     token_events += 1
                     emitted_text = True
-                    yield _sse({"type": "token", "content": token}, event="token")
+                    if visible_token:
+                        yield _sse({"type": "token", "content": visible_token}, event="token")
 
             elif part_type == "updates":
                 # If a provider does not expose message chunks, the completed
@@ -301,10 +362,18 @@ async def _chat_events(request: Request, payload: ChatRequest) -> AsyncGenerator
                         if not emitted_text:
                             text = _content_to_text(getattr(message, "content", ""))
                             if text:
-                                answer += text
+                                visible_text = answer_filter.feed(text)
+                                answer += visible_text
                                 token_events += 1
                                 emitted_text = True
-                                yield _sse({"type": "token", "content": text}, event="token")
+                                if visible_text:
+                                    yield _sse({"type": "token", "content": visible_text}, event="token")
+
+        trailing_text = answer_filter.flush()
+        if trailing_text:
+            answer += trailing_text
+            token_events += 1
+            yield _sse({"type": "token", "content": trailing_text}, event="token")
 
         library_storage = getattr(request.app.state, "library_storage", None)
         if library_storage is not None and answer:
@@ -536,7 +605,11 @@ def create_app() -> FastAPI:
         library_storage = getattr(request.app.state, "library_storage", None)
         if library_storage is None:
             raise HTTPException(status_code=503, detail="历史记录服务尚未完成初始化")
-        return await asyncio.to_thread(library_storage.list_messages, book_id, thread_id)
+        messages = await asyncio.to_thread(library_storage.list_messages, book_id, thread_id)
+        for message in messages:
+            if message.get("role") == "assistant":
+                message["content"] = _sanitize_assistant_output(message["content"])
+        return messages
 
     @app.post("/api/chat")
     async def chat(payload: ChatRequest, request: Request):
