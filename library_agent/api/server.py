@@ -7,6 +7,7 @@ store and ingestion pipeline remain the source of truth for domain behavior.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -114,6 +115,7 @@ class UploadResponse(BaseModel):
     filename: str
     chunks: int
     pages: int | None = None
+    duplicate: bool = False
     message: str
 
 
@@ -438,16 +440,22 @@ async def _chat_events(request: Request, payload: ChatRequest) -> AsyncGenerator
         request_id_context.reset(request_token)
 
 
-def _store_uploaded_file(upload_dir: Path, book_id: str, upload: UploadFile) -> tuple[Path, str]:
+def _content_book_id(digest: str) -> str:
+    """Create a Chroma-safe stable ID from the uploaded file content."""
+    return f"book_{digest[:56]}"
+
+
+def _store_uploaded_file(upload_dir: Path, upload: UploadFile) -> tuple[Path, str, str]:
     original_name = Path(upload.filename or "document").name
     suffix = Path(original_name).suffix.lower()
     if suffix not in SUPPORTED_SUFFIXES:
         raise ValueError("目前只支持 PDF 或 TXT 文件")
 
-    tenant_dir = upload_dir / book_id
+    tenant_dir = upload_dir / ".incoming"
     tenant_dir.mkdir(parents=True, exist_ok=True)
     stored_name = f"{uuid4().hex}{suffix}"
     destination = tenant_dir / stored_name
+    content_hash = hashlib.sha256()
 
     with destination.open("wb") as output:
         while True:
@@ -455,7 +463,8 @@ def _store_uploaded_file(upload_dir: Path, book_id: str, upload: UploadFile) -> 
             if not chunk:
                 break
             output.write(chunk)
-    return destination, original_name
+            content_hash.update(chunk)
+    return destination, original_name, _content_book_id(content_hash.hexdigest())
 
 
 def _ingest_file(pipeline: VectorPipeline, vector_store, path: Path, book_id: str) -> int:
@@ -466,6 +475,18 @@ def _ingest_file(pipeline: VectorPipeline, vector_store, path: Path, book_id: st
 def _display_meta(path: Path, pages: int | None) -> str:
     suffix = path.suffix.upper().lstrip(".") or "FILE"
     return f"{suffix} · {pages} pages" if pages is not None else f"{suffix} · indexed"
+
+
+def _move_to_content_directory(upload_dir: Path, path: Path, book_id: str) -> Path:
+    destination_dir = upload_dir / book_id
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    destination = destination_dir / path.name
+    path.replace(destination)
+    try:
+        path.parent.rmdir()
+    except OSError:
+        pass
+    return destination
 
 
 @asynccontextmanager
@@ -487,7 +508,7 @@ async def lifespan(app: FastAPI):
     # introduced. The original filename is not available in that case, so the
     # stored book_id remains the safe fallback title.
     for book_dir in settings.upload_dir.iterdir():
-        if not book_dir.is_dir() or book_dir.name in known_books:
+        if not book_dir.is_dir() or book_dir.name.startswith(".") or book_dir.name in known_books:
             continue
         files = [path for path in book_dir.iterdir() if path.is_file()]
         if not files:
@@ -511,7 +532,7 @@ async def lifespan(app: FastAPI):
             _display_meta(bundled_source, get_pdf_page_count(str(bundled_source))),
         )
     for book_dir in settings.upload_dir.iterdir():
-        if not book_dir.is_dir() or book_dir.name not in known_books:
+        if not book_dir.is_dir() or book_dir.name.startswith(".") or book_dir.name not in known_books:
             continue
         sources = [path for path in book_dir.iterdir() if path.is_file()]
         if not sources:
@@ -646,24 +667,25 @@ def create_app() -> FastAPI:
 
         pipeline = getattr(request.app.state, "pipeline", None)
         vector_store = getattr(request.app.state, "vector_store", None)
+        library_storage = getattr(request.app.state, "library_storage", None)
         settings = getattr(request.app.state, "settings", RuntimeSettings.from_environment())
-        if pipeline is None or vector_store is None:
+        if pipeline is None or vector_store is None or library_storage is None:
             raise HTTPException(status_code=503, detail="服务尚未完成初始化")
 
+        requested_book_id = book_id
         upload_started_at = perf_counter()
         logger.info(
             "upload_started",
             extra={
                 "event": "upload_started",
-                "book_id": book_id,
+                "requested_book_id": requested_book_id,
                 "upload_filename": Path(file.filename or "document").name,
             },
         )
         try:
-            path, original_name = await asyncio.to_thread(
+            path, original_name, content_book_id = await asyncio.to_thread(
                 _store_uploaded_file,
                 settings.upload_dir,
-                book_id,
                 file,
             )
             pages = (
@@ -671,17 +693,42 @@ def create_app() -> FastAPI:
                 if path.suffix.lower() == ".pdf"
                 else None
             )
-            chunks = await asyncio.to_thread(_ingest_file, pipeline, vector_store, path, book_id)
-            library_storage = getattr(request.app.state, "library_storage", None)
-            if library_storage is not None:
-                await asyncio.to_thread(
-                    library_storage.upsert_book,
-                    book_id,
-                    Path(original_name).stem,
-                    _display_meta(path, pages),
-                    original_name,
-                    chunks,
+            book_id = content_book_id
+            existing_ids = {
+                book["id"]
+                for book in await asyncio.to_thread(library_storage.list_books)
+            }
+            if book_id in existing_ids:
+                path.unlink(missing_ok=True)
+                logger.info(
+                    "upload_duplicate_skipped",
+                    extra={
+                        "event": "upload_duplicate_skipped",
+                        "book_id": book_id,
+                        "upload_filename": original_name,
+                        "pages": pages,
+                        "duration_ms": round((perf_counter() - upload_started_at) * 1000, 2),
+                    },
                 )
+                return UploadResponse(
+                    book_id=book_id,
+                    filename=original_name,
+                    chunks=0,
+                    pages=pages,
+                    duplicate=True,
+                    message="这本书已经存在，无需重复索引",
+                )
+
+            path = _move_to_content_directory(settings.upload_dir, path, book_id)
+            chunks = await asyncio.to_thread(_ingest_file, pipeline, vector_store, path, book_id)
+            await asyncio.to_thread(
+                library_storage.upsert_book,
+                book_id,
+                Path(original_name).stem,
+                _display_meta(path, pages),
+                original_name,
+                chunks,
+            )
         except ValueError as exc:
             logger.warning(
                 "upload_rejected",
@@ -709,6 +756,7 @@ def create_app() -> FastAPI:
                 "upload_filename": original_name,
                 "chunks": chunks,
                 "pages": pages,
+                "duplicate": False,
                 "duration_ms": round((perf_counter() - upload_started_at) * 1000, 2),
             },
         )
@@ -718,6 +766,7 @@ def create_app() -> FastAPI:
             filename=original_name,
             chunks=chunks,
             pages=pages,
+            duplicate=False,
             message="文件上传并建库成功，现在可以开始对话",
         )
 

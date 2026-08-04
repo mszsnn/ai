@@ -288,13 +288,27 @@ export default function Home() {
         method: "POST",
         body: formData,
       });
-      const result = (await response.json()) as { detail?: string; chunks?: number; pages?: number };
+      const result = (await response.json()) as {
+        detail?: string;
+        book_id?: string;
+        chunks?: number;
+        pages?: number;
+        duplicate?: boolean;
+      };
       if (!response.ok) {
         throw new Error(result.detail || "Upload failed");
       }
 
+      const nextBookId = result.book_id || bookId;
+      if (result.duplicate) {
+        selectBook(nextBookId);
+        setUploadStatus("这本书已经存在，无需重复索引");
+        window.setTimeout(() => setUploadStatus(null), 3800);
+        return;
+      }
+
       const nextBook: Book = {
-        id: bookId,
+        id: nextBookId,
         title: file.name.replace(/\.[^/.]+$/, ""),
         meta: result.pages
           ? `${file.name.toUpperCase().split(".").pop()} · ${result.pages} pages`
@@ -303,8 +317,8 @@ export default function Home() {
         accent: "#8765db",
         indexed: true,
       };
-      setBooks((current) => [nextBook, ...current.filter((book) => book.id !== bookId)]);
-      selectBook(bookId);
+      setBooks((current) => [nextBook, ...current.filter((book) => book.id !== nextBookId)]);
+      selectBook(nextBookId);
       setUploadStatus(`${nextBook.title} is ready to read`);
       window.setTimeout(() => setUploadStatus(null), 3800);
     } catch (error) {
